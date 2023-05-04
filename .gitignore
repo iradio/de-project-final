@@ -1,2 +1,3 @@
-./secrets
-./store
+secrets
+store
+*.cpython-39.pyc
