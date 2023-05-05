@@ -1,1 +1,2 @@
 vertica_python
+psycopg2
