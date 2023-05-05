@@ -1,100 +1,206 @@
 from airflow import DAG
-from airflow.operators.bash import BashOperator
-from airflow.operators.python import PythonOperator
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+
+from airflow.operators.dummy_operator import DummyOperator
+from airflow.operators.python_operator import PythonOperator, BranchPythonOperator
+from airflow.providers.postgres.operators.postgres import PostgresOperator
+from airflow.hooks.base import BaseHook
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+
 from airflow.decorators import dag
 from airflow.models import Variable
 
-import pendulum
-import boto3
+from datetime import datetime, timedelta
+# import boto3
 
 import vertica_python
+import psycopg2
+
+# import the logging module
+import logging
+
+import csv
+import json
 
 import os
 import hashlib
 
-# Don't forget to set up variables in Airflow UI
-AWS_ACCESS_KEY_ID = Variable.get("AWS_ACCESS_KEY_ID")
-AWS_SECRET_ACCESS_KEY = Variable.get("AWS_SECRET_ACCESS_KEY")
-conn_info =Variable.get("vertica_connection", deserialize_json=True)
+# Don't forget to set up Connection and Variable in Airflow UI
+# postgres_connection = 'postgres_connection'
+postgres_connection = Variable.get("postgres_connection", deserialize_json=True)
+vertica_connection = Variable.get("vertica_connection", deserialize_json=True)
 
-def fetch_s3_file(bucket: str, key: str):
-    print(key)
-    session = boto3.session.Session()
-    s3_client = session.client(
-        service_name='s3',
-        endpoint_url='https://storage.yandexcloud.net',
-        aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-    )
-    s3_client.download_file(
-        Bucket=bucket,
-        Key=key,
-        Filename='/data/'+key
-    )
+batch_size = 1000
+
+# get the airflow.task logger
+logger = logging.getLogger("airflow.task")
 
 
-def add_hash(src: str, dst: str):
-    try:
-        os.remove(dst)
-    except OSError:
-        pass
-    with open(f'/data/{dst}','w',encoding='utf-8') as outfile:
-        with open(f'/data/{src}','r',encoding='utf-8') as infile:
-            for line in infile:
-                hashed = hashlib.blake2b(line.encode('utf-8'),digest_size=16).hexdigest()
-                outfile.write(str(hashed)+','+line)
+def get_latest(connection, tablename, orderby, **context):
+    # Establish a connection to the Vertica database
+    conn = vertica_python.connect(**connection)
 
-def execute_sql(path: str):
-    fd = open(path,'r')
-    sql_string = fd.read()
-    fd.close()
+    # Create a cursor
+    cur = conn.cursor()
 
-    with vertica_python.connect(**conn_info) as connection:
-        cursor = connection.cursor()
-        cursor.execute(sql_string)
-        cursor.close()
+    # Execute the query to select the latest value by the `date_update` column from the `currencies` table
+    sql = f'SELECT * FROM TIM_ALEINIKOV_YANDEX_RU__STAGING."{tablename}" ORDER BY "{orderby}" DESC LIMIT 1'
+    logger.info(f"SQL satement: {sql}")
+    cur.execute(sql)
+    
+    # Fetch the result
+    last_date = cur.fetchone() or '2022-10-01 00:00:00.000'
+    # last_date = '2022-10-01 00:00:00.000'
 
-def load_table_vertica(dataset: str,tablename: str):
-    with vertica_python.connect(**conn_info) as connection:
-        cursor = connection.cursor()
-        with open(f"/data/{dataset}", 'rb') as csvfile:
-            cursor.copy(f"COPY TIMALEINIKOVYANDEXRU__STAGING.{tablename} FROM STDIN DELIMITER ',' ENCLOSED BY '\"'", csvfile, buffer_size=65536)
+    # Close the cursor and the connection
+    cur.close()
+    conn.close()
+    
+    context['ti'].xcom_push(key=f'last_{tablename}_{orderby}', value=last_date)
+    return True
+
+def extract_table(connection, tablename, orderby, **context):
+    # Retrieve data from previous task
+    last_date = context['ti'].xcom_pull(key=f'last_{tablename}_{orderby}')
+    logger.info(f"Last date is {last_date}")
+
+    execution_date = context['execution_date'].strftime('%Y-%m-%d')
+    logger.info(f"Execution date is {execution_date}")
+
+    # conn = psycopg2.connect(database=database, user=user, password=password, host=host, port=port)
+    conn = psycopg2.connect(**connection)
+    cur = conn.cursor()
+    
+    offset = 0
+    rest = 1
+    files = []
+    while rest != 0 :
+
+        # Execute the query to select all rows from the table
+        sql = f"SELECT * FROM public.{tablename} WHERE to_char({orderby},'yyyy-mm-dd') ='{execution_date}' LIMIT {batch_size} OFFSET {offset}"
+        logger.info(f"SQL satement: {sql}")
+        cur.execute(sql)
+
+        # Fetch all rows from the query result
+        rows = cur.fetchall()
+        rest = len(rows)
+        logger.info(f"rows: {rest}")
+        if rest == 0:
+            break
+        
+        filepath = f"/tmp/airflow/stg_{tablename}_{execution_date}_{offset // batch_size}.csv"
+        
+        # Write the data to a CSV file
+        with open(filepath, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow([i[0] for i in cur.description])  # Write the header row
+            for row in rows:
+                writer.writerow(row)
+            files.append(filepath)        
+
+        # increment offset
+        offset += batch_size
+
+    # Close the cursor and database connection
+    cur.close()
+    conn.close()
+    logger.info(f"Files: {filepath}")
+    context['ti'].xcom_push(key=f'files_{tablename}_{execution_date}', value=json.dumps(files))
 
 
-@dag(schedule_interval=None, start_date=pendulum.parse('2022-07-13'))
-def sprint6_project():
- 
-    extract_groups = PythonOperator(
-        task_id='extract_groups',
-        python_callable=fetch_s3_file,
-        op_kwargs={'bucket': 'sprint6', 'key': 'group_log.csv'}
-    )
+def load_table():
+    return True
 
-    init_table = PythonOperator(
-        task_id='init_table',
-        python_callable=execute_sql,
-        op_kwargs={'path': '/lessons/dags/sql/ddl_stg.sql'}
-    )
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'start_date': datetime(2020, 12, 1),
+    'retries': 1,
+    'retry_delay': timedelta(minutes=30)
+}
 
-    hash_groups = PythonOperator(
-        task_id='hash_groups',
-        python_callable=add_hash,
-        op_kwargs={'src': 'group_log.csv','dst':'group_log_hashed.csv'},
-    )
-
-    load_groups = PythonOperator(
-        task_id='load_groups',
-        python_callable=load_table_vertica,
-        op_kwargs={'dataset': 'group_log_hashed.csv','tablename':'group_log'},
-    )
+dag = DAG('final_project_stg', default_args=default_args, schedule_interval='@daily')
 
 
-    fill_dds = PythonOperator(
-        task_id='fill_dds',
-        python_callable=execute_sql,
-        op_kwargs={'path': '/lessons/dags/sql/fill_dds.sql'}
-    )
+# Define the tasks in the first group
+latest_currency_task = PythonOperator(
+    task_id="latest_currency",
+    python_callable=get_latest,
+    op_kwargs={"connection": vertica_connection,
+               "tablename":"currencies",
+               "orderby": "date_update"
+               },
+    provide_context=True,
+    dag=dag
+)
 
-    extract_groups >> hash_groups >> init_table >> load_groups >> fill_dds
+extract_currencies_task = PythonOperator(
+    task_id='extract_currencies',
+    python_callable=extract_table,
+    op_kwargs={"connection": postgres_connection,
+               "tablename":"currencies",
+               "orderby": "date_update"
+               },
+    provide_context=True,
+    dag=dag
+)
 
-dag = sprint6_project()
+load_currencies_task = PythonOperator(
+    task_id='load_currencies',
+    python_callable=load_table,
+    op_kwargs={"connection": vertica_connection,
+               "tablename":"currencies",
+               "orderby": "date_update"
+               },
+    provide_context=True,
+    dag=dag
+)
+
+# Define the tasks in the second group
+latest_transaction_task = PythonOperator(
+    task_id="latest_transaction",
+    python_callable=get_latest,
+    op_kwargs={"connection": vertica_connection,
+               "tablename":"transactions",
+               "orderby": "transaction_dt"
+               },
+    provide_context=True,
+    dag=dag
+)
+
+extract_transactions_task = PythonOperator(
+    task_id='extract_transactions',
+    python_callable=extract_table,
+    op_kwargs={"connection": postgres_connection,
+               "tablename":"transactions",
+               "orderby": "transaction_dt"
+               },
+    provide_context=True,
+    dag=dag
+)
+
+load_transactions_task = PythonOperator(
+    task_id='load_transactions',
+    python_callable=load_table,
+    op_kwargs={"connection": vertica_connection,
+               "tablename":"transactions",
+               "orderby": "transaction_dt"
+               },
+    provide_context=True,
+    dag=dag
+)
+
+# Define a dummy task to join the two groups
+join_tasks = DummyOperator(
+    task_id='join_tasks',
+    dag=dag
+)
+
+# Set up dependencies between tasks
+latest_currency_task >> extract_currencies_task >> load_currencies_task
+latest_transaction_task >> extract_transactions_task >> load_transactions_task
+
+
+
+# Set up dependencies between groups of tasks
+[load_currencies_task, load_transactions_task] >> join_tasks
