@@ -2,11 +2,12 @@ version: '3'
 
 services:
   de-final-prj-local:
-    image: sindb/de-final-prj:latest
+    build:
+      context: ./src
+    image: src:local
     ports:
       - 8998:8998 
       - 8280:8280
       - 15432:5432
     volumes:
-      - "./src/dags:/lessons/dags:ro"
-      # - "./store/local_pg/:/var/lib/postgresql/:rw"
+      - "./src/dags:/lessons/dags:ro"  

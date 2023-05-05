@@ -1,0 +1,13 @@
+version: '3'
+
+services:
+  de-final-prj-local:
+    image: sindb/de-final-prj:latest
+    ports:
+      - 8998:8998 
+      - 8280:8280
+      - 15432:5432
+    volumes:
+      - "./src/dags:/lessons/dags:ro"
+      - "./store/metabase_plugins/vertica-jdbc-11.0.2-0.jar:/opt/metabase/plugins/vertica-jdbc-11.0.2-0.jar:ro"
+  
