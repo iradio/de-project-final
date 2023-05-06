@@ -88,6 +88,7 @@ def read_csv_file(csv_file_path):
 
 def load_table(connection, table_name, orderby, **context):
     execution_date = context['logical_date'].strftime('%Y-%m-%d')
+    execution_date_under = str(execution_date).replace('-','_')
     files = json.loads(context['ti'].xcom_pull(key=f'files_{table_name}_{execution_date}'))
     logger.info(f"Files: {files}")
 
@@ -98,9 +99,9 @@ def load_table(connection, table_name, orderby, **context):
 
     if (table_name == 'transactions'):
         create_ddl = f"""
-        DROP TABLE IF EXISTS {schema_name}.{table_name}_{str(execution_date).replace('-','_')};
+        DROP TABLE IF EXISTS {schema_name}.{table_name}_{execution_date_under};
 
-        CREATE TABLE IF NOT EXISTS {schema_name}.{table_name}_{str(execution_date).replace('-','_')} (
+        CREATE TABLE IF NOT EXISTS {schema_name}.{table_name}_{execution_date_under} (
             operation_id varchar(60) NULL,
             account_number_from int NULL,
             account_number_to int NULL,
@@ -117,9 +118,9 @@ def load_table(connection, table_name, orderby, **context):
         PARTITION BY COALESCE(transaction_dt::date,'1900-01-01');
         """
         drop_duplicates_sql = f"""
-        delete from {schema_name}.{table_name}_{str(execution_date).replace('-','_')}
-            where load_id in (
-                select load_id from (
+        DELETE FROM {schema_name}.{table_name}_{execution_date_under}
+            WHERE load_id in (
+                SELECT load_id from (
                     SELECT load_id , ROW_NUMBER() OVER(
                         partition by account_number_from
                             ,account_number_to
@@ -131,24 +132,24 @@ def load_table(connection, table_name, orderby, **context):
                             ,transaction_dt
                             ,operation_id
                         order by load_id) as rnum
-                    FROM {schema_name}.{table_name}_{str(execution_date).replace('-','_')}
+                    FROM {schema_name}.{table_name}_{execution_date_under}
                 ) s 
-                where rnum > 1
+                WHERE rnum > 1
             );
         """
         merge_sql = f"""
         MERGE INTO {schema_name}.{table_name} t
-        USING {schema_name}.{table_name}_{str(execution_date).replace('-','_')} s
-        ON t.operation_id = s.operation_id 
+        USING {schema_name}.{table_name}_{execution_date_under} s
+        ON t.operation_id = s.operation_id
+            and t.account_number_from = s.account_number_from
+            and t.account_number_to = s.account_number_to
+            and t.transaction_dt = s.transaction_dt
         WHEN MATCHED THEN UPDATE SET 
-            account_number_from = s.account_number_from,
-            account_number_to = s.account_number_to,
             currency_code = s.currency_code,
             country = s.country,
             status = s.status,
             transaction_type = s.transaction_type,
-            amount = s.amount,
-            transaction_dt = s.transaction_dt
+            amount = s.amount
         WHEN NOT MATCHED THEN INSERT (
             account_number_from
             ,account_number_to
@@ -172,9 +173,9 @@ def load_table(connection, table_name, orderby, **context):
         """
     elif (table_name == 'currencies'):
         create_ddl = f"""
-        DROP TABLE IF EXISTS {schema_name}.{table_name}_{str(execution_date).replace('-','_')};
+        DROP TABLE IF EXISTS {schema_name}.{table_name}_{execution_date_under};
 
-        CREATE TABLE IF NOT EXISTS {schema_name}.{table_name}_{str(execution_date).replace('-','_')} (
+        CREATE TABLE IF NOT EXISTS {schema_name}.{table_name}_{execution_date_under} (
             date_update TIMESTAMP(0) NULL,
             currency_code int NULL,
             currency_code_with int NULL,
@@ -183,18 +184,18 @@ def load_table(connection, table_name, orderby, **context):
         );
         """
         drop_duplicates_sql = f"""
-        delete from {schema_name}.{table_name}_{str(execution_date).replace('-','_')}
-            where load_id in (select load_id from (
+        DELETE FROM {schema_name}.{table_name}_{execution_date_under}
+            WHERE load_id in (select load_id from (
                 SELECT load_id , ROW_NUMBER() OVER(
                     partition by date_update, currency_code, currency_code_with, currency_with_div
                     order by load_id) as rnum
-                FROM {schema_name}.{table_name}_{str(execution_date).replace('-','_')}
+                FROM {schema_name}.{table_name}_{execution_date_under}
             ) s 
-            where rnum > 1)
+            WHERE rnum > 1)
         """
         merge_sql = f"""
         MERGE INTO {schema_name}.{table_name} t
-        USING {schema_name}.{table_name}_{str(execution_date).replace('-','_')} s
+        USING {schema_name}.{table_name}_{execution_date_under} s
         ON (t.currency_code = s.currency_code) and (t.currency_code_with = s.currency_code_with) and (t.date_update = s.date_update)
         WHEN MATCHED THEN UPDATE SET currency_with_div = s.currency_with_div
         WHEN NOT MATCHED THEN INSERT (date_update, currency_code, currency_code_with, currency_with_div) 
@@ -209,25 +210,25 @@ def load_table(connection, table_name, orderby, **context):
 
     for filepath in files:
         with open(filepath, 'rb') as csvfile:
-            copy_sql =   f"COPY {schema_name}.{table_name}_{str(execution_date).replace('-','_')} " \
+            copy_sql =   f"COPY {schema_name}.{table_name}_{execution_date_under} " \
                     f"FROM STDIN DELIMITER ',' ENCLOSED BY '\"' NULL AS '' " \
                     f"DIRECT STREAM NAME 'stg_stream' " \
                     f"REJECTED DATA AS TABLE {schema_name}.rejected_data;"
-            logger.info(f"Load file {filepath} to table: {schema_name}.{table_name}_{str(execution_date).replace('-','_')}")
+            logger.info(f"Load file {filepath} to table: {schema_name}.{table_name}_{execution_date_under}")
             cursor.copy(copy_sql, csvfile, buffer_size=65536)
             # cursor.copy(f"COPY TIM_ALEINIKOV_YANDEX_RU__STAGING.{table_name} FROM STDIN DELIMITER ',' ENCLOSED BY '\"'", csvfile, buffer_size=65536)
         conn.commit()
         os.remove(filepath)
         logger.info(f'File loaded and removed: {filepath}')
     
-    logger.info(f"Dropping duplicates in table: {schema_name}.{table_name}_{str(execution_date).replace('-','_')}")
+    logger.info(f"Dropping duplicates in table: {schema_name}.{table_name}_{execution_date_under}")
     cursor.execute(drop_duplicates_sql)
-    logger.info(f"Execution merge SQL: {schema_name}.{table_name}_{str(execution_date).replace('-','_')} INTO {schema_name}.{table_name}")
+    logger.info(f"Execution merge SQL: {schema_name}.{table_name}_{execution_date_under} INTO {schema_name}.{table_name}")
     cursor.execute(merge_sql)
-    logger.info(f"Drop temporary table: {schema_name}.{table_name}_{str(execution_date).replace('-','_')}")
-    drop_temp_sql = f"DROP TABLE IF EXISTS {schema_name}.{table_name}_{str(execution_date).replace('-','_')};"
+    logger.info(f"Drop temporary table: {schema_name}.{table_name}_{execution_date_under}")
+    drop_temp_sql = f"DROP TABLE IF EXISTS {schema_name}.{table_name}_{execution_date_under};"
     
-    # cursor.execute(drop_temp_sql)
+    cursor.execute(drop_temp_sql)
     conn.commit()
     
     cursor.close()
@@ -241,7 +242,7 @@ default_args = {
     'retry_delay': timedelta(minutes=30)
 }
 
-dag = DAG('fast_stg', default_args=default_args, schedule_interval='@daily')
+dag = DAG('idempotent_stg', default_args=default_args, schedule_interval='@daily')
 
 extract_currencies_task = PythonOperator(
     task_id='extract_currencies',
