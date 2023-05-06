@@ -92,11 +92,14 @@ def load_table(connection, table_name, orderby, **context):
     files = json.loads(context['ti'].xcom_pull(key=f'files_{table_name}_{execution_date}'))
     logger.info(f"Files: {files}")
 
-
-
-    conn = vertica_python.connect(**connection)
-    cursor = conn.cursor()
-
+    # SQL string definition
+    copy_sql = f"""
+        COPY {schema_name}.{table_name}_{execution_date_under} 
+        FROM STDIN DELIMITER ',' ENCLOSED BY '\"' NULL AS ''
+        DIRECT STREAM NAME 'stg_stream'
+        REJECTED DATA AS TABLE {schema_name}.rejected_data;
+    """
+    
     if (table_name == 'transactions'):
         create_ddl = f"""
         DROP TABLE IF EXISTS {schema_name}.{table_name}_{execution_date_under};
@@ -204,28 +207,29 @@ def load_table(connection, table_name, orderby, **context):
     else:
         logger.warning(f"unknown table {table_name}. Skipping...")
         return
+
+
+    conn = vertica_python.connect(**connection)
+    cursor = conn.cursor()
+
     
     logger.info(f"Creating temporary table {table_name}")
     cursor.execute(create_ddl)
 
     for filepath in files:
         with open(filepath, 'rb') as csvfile:
-            copy_sql =   f"COPY {schema_name}.{table_name}_{execution_date_under} " \
-                    f"FROM STDIN DELIMITER ',' ENCLOSED BY '\"' NULL AS '' " \
-                    f"DIRECT STREAM NAME 'stg_stream' " \
-                    f"REJECTED DATA AS TABLE {schema_name}.rejected_data;"
             logger.info(f"Load file {filepath} to table: {schema_name}.{table_name}_{execution_date_under}")
             cursor.copy(copy_sql, csvfile, buffer_size=65536)
-            # cursor.copy(f"COPY TIM_ALEINIKOV_YANDEX_RU__STAGING.{table_name} FROM STDIN DELIMITER ',' ENCLOSED BY '\"'", csvfile, buffer_size=65536)
+            
         conn.commit()
         os.remove(filepath)
-        logger.info(f'File loaded and removed: {filepath}')
+        logger.info(f'Remove temp file: {filepath}')
     
-    logger.info(f"Dropping duplicates in table: {schema_name}.{table_name}_{execution_date_under}")
+    logger.info(f"Drop duplicates in table: {schema_name}.{table_name}_{execution_date_under}")
     cursor.execute(drop_duplicates_sql)
-    logger.info(f"Execution merge SQL: {schema_name}.{table_name}_{execution_date_under} INTO {schema_name}.{table_name}")
+    logger.info(f"Execute merge SQL: {schema_name}.{table_name}_{execution_date_under} INTO {schema_name}.{table_name}")
     cursor.execute(merge_sql)
-    logger.info(f"Drop temporary table: {schema_name}.{table_name}_{execution_date_under}")
+    logger.info(f"Drop temp table: {schema_name}.{table_name}_{execution_date_under}")
     drop_temp_sql = f"DROP TABLE IF EXISTS {schema_name}.{table_name}_{execution_date_under};"
     
     cursor.execute(drop_temp_sql)
@@ -297,8 +301,6 @@ join_tasks = DummyOperator(
 # Set up dependencies between tasks
 extract_currencies_task >> load_currencies_task
 extract_transactions_task >> load_transactions_task
-
-
 
 # Set up dependencies between groups of tasks
 [load_currencies_task, load_transactions_task] >> join_tasks
