@@ -248,7 +248,7 @@ default_args = {
     'retry_delay': timedelta(minutes=30)
 }
 
-dag = DAG('idempotent_stg', default_args=default_args, schedule_interval='@daily')
+dag = DAG('stg_currencies_and_transactions', default_args=default_args, schedule_interval='@daily')
 
 extract_currencies_task = PythonOperator(
     task_id='extract_currencies',
