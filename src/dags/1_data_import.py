@@ -36,9 +36,9 @@ schema_name = 'TIM_ALEINIKOV_YANDEX_RU__STAGING'
 batch_size = 1000
 
 
-
 def extract_table(connection, table_name, orderby, **context):
-    execution_date = context['logical_date'].strftime('%Y-%m-%d')
+    # достаем дату запуска DAG и сдвигаем на -1 день для извлечения данных за "вчера"
+    execution_date = (context['logical_date'] - timedelta(days=1) ).strftime('%Y-%m-%d') 
     logger.info(f"Execution date is {execution_date}")
 
     # conn = psycopg2.connect(database=database, user=user, password=password, host=host, port=port)
@@ -87,7 +87,9 @@ def read_csv_file(csv_file_path):
         return [row for row in reader]
 
 def load_table(connection, table_name, orderby, **context):
-    execution_date = context['logical_date'].strftime('%Y-%m-%d')
+    # достаем дату запуска DAG и сдвигаем на -1 день для извлечения данных за "вчера"
+    execution_date = (context['logical_date'] - timedelta(days=1)).strftime('%Y-%m-%d') 
+
     execution_date_under = str(execution_date).replace('-','_')
     files = json.loads(context['ti'].xcom_pull(key=f'files_{table_name}_{execution_date}'))
     logger.info(f"Files: {files}")
@@ -99,6 +101,7 @@ def load_table(connection, table_name, orderby, **context):
         DIRECT STREAM NAME 'stg_stream'
         REJECTED DATA AS TABLE {schema_name}.rejected_data;
     """
+    drop_temp_sql = f"DROP TABLE IF EXISTS {schema_name}.{table_name}_{execution_date_under};"
     
     if (table_name == 'transactions'):
         create_ddl = f"""
@@ -230,9 +233,8 @@ def load_table(connection, table_name, orderby, **context):
     logger.info(f"Execute merge SQL: {schema_name}.{table_name}_{execution_date_under} INTO {schema_name}.{table_name}")
     cursor.execute(merge_sql)
     logger.info(f"Drop temp table: {schema_name}.{table_name}_{execution_date_under}")
-    drop_temp_sql = f"DROP TABLE IF EXISTS {schema_name}.{table_name}_{execution_date_under};"
-    
     cursor.execute(drop_temp_sql)
+
     conn.commit()
     
     cursor.close()
