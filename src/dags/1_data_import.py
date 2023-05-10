@@ -128,7 +128,8 @@ def load_table(connection, table_name, orderby, **context):
             WHERE load_id in (
                 SELECT load_id from (
                     SELECT load_id , ROW_NUMBER() OVER(
-                        partition by account_number_from
+                        partition by operation_id
+                            ,account_number_from
                             ,account_number_to
                             ,currency_code
                             ,country
@@ -136,7 +137,6 @@ def load_table(connection, table_name, orderby, **context):
                             ,transaction_type
                             ,amount
                             ,transaction_dt
-                            ,operation_id
                         order by load_id) as rnum
                     FROM {schema_name}.{table_name}_{execution_date_under}
                 ) s 
