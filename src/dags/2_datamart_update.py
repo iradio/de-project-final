@@ -45,6 +45,7 @@ def calculate_global_metrics(connection, table_name, **context):
         r as (
             select 
             to_char(t.transaction_dt,'yyyy-mm-dd') as transaction_day
+            , t.operation_id
             ,t.currency_code as  currency_from
             , t.amount as amount 
             , COALESCE(c.currency_with_div, 1) as usd_currency_div
@@ -53,19 +54,20 @@ def calculate_global_metrics(connection, table_name, **context):
             left join chargeback cb using (operation_id)
             left join {stg_schema_name}.currencies c 
                 on to_char(c.date_update,'yyyy-mm-dd') = to_char(t.transaction_dt,'yyyy-mm-dd')
-                                and c.currency_code_with = 420 
+                                and c.currency_code_with = 420 -- выбираем курс к доллару
                                 and t.currency_code  = c.currency_code
             where cb.operation_id is null
-        		and transaction_day = '{execution_date}'
-                and t.account_number_from != -1
-                and t.status = 'done'
+        		and transaction_day = '{execution_date}' -- выбираем только один день
+                and t.account_number_from != -1 -- убираем тестовые аккаунты
+                and t.status = 'done' -- оставляем только done
+                and t.transaction_type like '%incoming' -- оставляем только incoming тразации
             order by t.operation_id
         ) 
         select 
             to_date(r.transaction_day,'yyyy-mm-dd') as date_update
             , r.currency_from::int as currency_from
-            , sum(r.amount * r.usd_currency_div)::numeric(16,2) as amount_total 
-            , count(*)::int as cnt_transactions
+            , sum(r.amount * r.usd_currency_div)::numeric(18,2) as amount_total 
+            , count(distinct operation_id)::int as cnt_transactions
             , count(distinct account_make_transaction)::int as cnt_accounts_make_transactions 
             , cnt_transactions / cnt_accounts_make_transactions::numeric(16,2) as avg_transactions_per_account
         from r
