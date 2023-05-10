@@ -7,10 +7,13 @@
 Файлы в репозитории будут использоваться для проверки и обратной связи по проекту. Поэтому постарайтесь публиковать ваше решение согласно установленной структуре: так будет проще соотнести задания с решениями.
 
 Внутри `src` расположены папки:
-- `/src/dags` - вложите в эту папку код DAG, который поставляет данные из источника в хранилище. Назовите DAG `1_data_import.py`. Также разместите здесь DAG, который обновляет витрины данных. Назовите DAG `2_datamart_update.py`.
-- `/src/sql` - сюда вложите SQL-запрос формирования таблиц в `STAGING`- и `DWH`-слоях, а также скрипт подготовки данных для итоговой витрины.
-- `/src/py` - если источником вы выберете Kafka, то в этой папке разместите код запуска генерации и чтения данных в топик.
-- `/src/img` - здесь разместите скриншот реализованного над витриной дашборда.
+- `/src/dags` - каталог хранения DAG монтируемый при старте контейнера. 
+	* `1_data_import.py` - пайплайн наполнения STG из реплики продуктового Postgres данными таблиц `currencies` и `transactions`. 
+	* `2_datamart_update.py`- пайплайн обновлющий витрину данных `global_metrics` 
+- `/src/sql` - DDL для `STG`- и `CDM`-слоев.
+- `/src/img` - скриншот реализованного над витриной дашборда `Global Metrics`.
+- `/src/py` - не используется в текущей реализации.
+
 
 ## Архитектура
 Выбраная архитектура решения
@@ -20,12 +23,12 @@
 ## Запуск инфраструктуры 
 ### Локальная
 ```bash
-docker run -d -p 8998:8998 -p 8280:8280 -p 15432:5432 --name=de-final-prj-local sindb/de-final-prj:latest
+docker compose -f "docker-compose.yaml" up -d --build
 ```
 Информация по размещению инструментов есть внутри образа, в частности:
 - Адрес Metabase — 8998. http://localhost:8998/
 - Адрес Airflow — 8280.  http://localhost:8280/airflow/ 
-- Postgres
+- Postgres - 15432. 
 
 ### Облачная
 
@@ -35,22 +38,32 @@ docker run -d -p 8998:8998 -p 8280:8280 -p 15432:5432 --name=de-final-prj-local 
 
 ### Extract data from
 В компании запущена PostgreSQL для продакшена. Для построения инфраструктуры аналитики и поставки данных предоставлена отдельная PostgreSQL, копия продовой БД. В таблицах public.transactions и public.currencies есть доступ на загрузку данных.
-Для доступа к БД создана учётная запись:
+```json
+{
+	"database": "db1",
+	"host" : "rc1b-w5d285tmxa8jimyn.mdb.yandexcloud.net",
+	"port" : "6432",
+	"username" : "[secrets]",
+	"password" : "[secrets]"
+}
 ```
-"database": "db1",
-"host" : "rc1b-w5d285tmxa8jimyn.mdb.yandexcloud.net",
-"port" : 6432,
-"username" : “[secrets]”,
-"password" : "[secrets]".
-```
+Креды: [secrets](./secrets/secrets.md)
 Перед тем как подключиться к БД, скачайте [сертификат](https://storage.yandexcloud.net/cloud-certs/CA.pem).
 
 ### Load data to
 Vertica
-- Адрес сервера:  vertica.tgcloudenv.ru
-- Креды: [secrets](./secrets/secrets.md)
-
-
+Адрес сервера:  vertica.tgcloudenv.ru / "51.250.75.20"
+``` json
+{
+	"host":"51.250.75.20",
+	"port":"5433",
+	"user":"[secrets]",
+	"password":"[secrets]",
+	"database":"dwh",
+	"autocommit":"True"
+}
+```
+Креды: [secrets](./secrets/secrets.md)
 ## Data
 
 ### transactions
@@ -79,9 +92,14 @@ Vertica
 - `amount` — целочисленная сумма транзакции в минимальной единице валюты страны (копейка, цент, куруш); 
 - `transaction_dt` — дата и время исполнения транзакции до миллисекунд.
 
-Вопросы:
+Заметки о данных:
 1. `account_number_from` бывает `-1`, но `account_number_to` - нет. Возможно `-1` это первичное зачисление средств.
 1. `amount` может быть отрицательным. при любом значении `status` (не только `chargeback`). Как это интерпретировать? 
+1. одна операция встречается много раз с разными статусами. Выбирать надо только t.status = 'done', 
+1. нужно вычесть из выборки те operation_id по которым есть status = 'chargeback' т.к. такие транзакции выглядят как отмененные. Справка: `A chargeback is a transaction where funds are transferred by an issuing bank from the merchant's account to the customer's account. A chargeback is initiated when a customer escalates a dispute against the merchant.`
+1. операции есть `transaction_type like '%incoming'` с положительным amount и `transaction_type like '%outgoing'` с отрицательным amount. Если сложить их как есть мы получим ерунду, т.к. у нас есть если  клиент А перевел 100 руб клиенту Б то сумма по двум транакциям будет 0. Но я не совсем понимаю должна ли "общая сумма транзакций"  быть 100р (выбираем только один тип, например incoming" или 200р (т.е. суммируем по модулю).
+
+!!! От постановщика задачи (куратор, преподаватель) не получены комментарии по найденным вопросам, задаем указанными выше предположениями.
 
 ### сurrencies
 Данные `сurrencies` — это справочник, который содержит в себе информацию об обновлениях курсов валют и взаимоотношениях валютных пар друг с другом.
@@ -91,3 +109,15 @@ Vertica
 - `currency_code` — трёхзначный код валюты транзакции;
 - `currency_code_with` — отношение другой валюты к валюте трёхзначного кода;
 - `currency_code_div` — значение отношения единицы одной валюты к единице валюты транзакции.
+
+### global_metrics
+Целевая витрина `TIM_ALEINIKOV_YANDEX_RU__DWH.global_metrics`
+- `date_update` — дата расчёта,
+- `currency_from` — код валюты транзакции;
+- `amount_total` — общая сумма транзакций по валюте в долларах;
+- `cnt_transactions` — общий объём транзакций по валюте;
+- `avg_transactions_per_account` — средний объём транзакций с аккаунта;
+- `cnt_accounts_make_transactions` — количество уникальных аккаунтов с совершёнными транзакциями по валюте.
+
+# Dashboard
+![Dashboard Global Metrics](./src/img/global-metrics.png)
