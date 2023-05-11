@@ -5,7 +5,7 @@ from airflow.operators.python_operator import PythonOperator
 from airflow.decorators import dag
 from airflow.models import Variable
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from default_args import default_args
 
@@ -21,18 +21,14 @@ stg_schema_name = Variable.get("stg_schema_name", default_var='TIM_ALEINIKOV_YAN
 cdm_schema_name = Variable.get("cdm_schema_name", default_var='TIM_ALEINIKOV_YANDEX_RU__DWH')
 cdm_table_name = Variable.get("cdm_table_name", default_var='global_metrics')
 
-def calculate_global_metrics(connection, table_name, **context):
-    # достаем дату запуска DAG и сдвигаем на -1 день для извлечения данных за "вчера"
-    execution_date = (context['logical_date'] - timedelta(days=1) ).strftime('%Y-%m-%d') 
-
-    # SQL string definition
-    delete_sql = f"""
-        delete from {cdm_schema_name}.{table_name}
+def create_delete_sql(cdm_schema_name, cdm_table_name, execution_date):
+    return f"""
+        delete from {cdm_schema_name}.{cdm_table_name}
         where date_update = to_date('{execution_date}','yyyy-mm-dd')    
     """
-
-    insert_sql = f"""
-        insert into {cdm_schema_name}.{table_name}
+def create_insert_sql(stg_schema_name, cdm_schema_name, cdm_table_name, execution_date):
+    return f"""
+        insert into {cdm_schema_name}.{cdm_table_name}
         with chargeback as (
             select operation_id 
             from {stg_schema_name}.transactions t
@@ -77,6 +73,14 @@ def calculate_global_metrics(connection, table_name, **context):
         order by r.transaction_day, r.currency_from
     """
 
+def calculate_global_metrics(connection, table_name, **context):
+    # достаем дату запуска DAG и сдвигаем на -1 день для извлечения данных за "вчера"
+    execution_date = (context['logical_date'] - timedelta(days=1) ).strftime('%Y-%m-%d') 
+
+    # SQL string definition
+    delete_sql = create_delete_sql(cdm_schema_name, cdm_table_name, execution_date)
+    insert_sql = create_insert_sql(stg_schema_name, cdm_schema_name, cdm_table_name, execution_date)
+
     conn = vertica_python.connect(**connection)
     cursor = conn.cursor()
 
@@ -90,14 +94,6 @@ def calculate_global_metrics(connection, table_name, **context):
     
     cursor.close()
     conn.close()
-
-# default_args = {
-#     'owner': 'airflow',
-#     'depends_on_past': False,
-#     'start_date': datetime(2020, 12, 1),
-#     'retries': 1,
-#     'retry_delay': timedelta(minutes=30)
-# }
 
 dag = DAG('cdm_global_metrics', default_args=default_args, schedule_interval='@daily')
 

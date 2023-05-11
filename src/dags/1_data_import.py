@@ -6,7 +6,7 @@ from airflow.decorators import dag
 from airflow.models import Variable
 
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import vertica_python
 import psycopg2
@@ -44,9 +44,9 @@ def extract_table(connection, table_name, orderby, **context):
     while rest != 0 :
 
         # Execute the query to select all rows from the table
-        sql = f"SELECT * FROM public.{table_name} WHERE to_char({orderby},'yyyy-mm-dd') ='{execution_date}' LIMIT {batch_size} OFFSET {offset}"
-        logger.info(f"SQL satement: {sql}")
-        cur.execute(sql)
+        select_sql = f"SELECT * FROM public.{table_name} WHERE to_char({orderby},'yyyy-mm-dd') ='{execution_date}' LIMIT {batch_size} OFFSET {offset}"
+        logger.info(f"SQL satement: {select_sql}")
+        cur.execute(select_sql)
 
         # Fetch all rows from the query result
         rows = cur.fetchall()
@@ -79,25 +79,22 @@ def read_csv_file(csv_file_path):
         reader = csv.DictReader(file)
         return [row for row in reader]
 
-def load_table(connection, table_name, orderby, **context):
-    # достаем дату запуска DAG и сдвигаем на -1 день для извлечения данных за "вчера"
-    execution_date = (context['logical_date'] - timedelta(days=1)).strftime('%Y-%m-%d') 
-
+def create_copy_sql (stg_schema_name, table_name, execution_date):
     execution_date_under = str(execution_date).replace('-','_')
-    files = json.loads(context['ti'].xcom_pull(key=f'files_{table_name}_{execution_date}'))
-    logger.info(f"Files: {files}")
-
-    # SQL string definition
-    copy_sql = f"""
+    return f"""
         COPY {stg_schema_name}.{table_name}_{execution_date_under} 
         FROM STDIN DELIMITER ',' ENCLOSED BY '\"' NULL AS ''
         DIRECT STREAM NAME 'stg_stream'
         REJECTED DATA AS TABLE {stg_schema_name}.rejected_data;
     """
-    drop_temp_sql = f"DROP TABLE IF EXISTS {stg_schema_name}.{table_name}_{execution_date_under};"
-    
-    if (table_name == 'transactions'):
-        create_ddl = f"""
+
+def create_drop_sql (stg_schema_name, table_name, execution_date):
+    execution_date_under = str(execution_date).replace('-','_')
+    return f"DROP TABLE IF EXISTS {stg_schema_name}.{table_name}_{execution_date_under};"
+
+def create_transactions_ddl_sql (stg_schema_name, table_name, execution_date):
+    execution_date_under = str(execution_date).replace('-','_')
+    return f"""
         DROP TABLE IF EXISTS {stg_schema_name}.{table_name}_{execution_date_under};
 
         CREATE TABLE IF NOT EXISTS {stg_schema_name}.{table_name}_{execution_date_under} (
@@ -116,7 +113,10 @@ def load_table(connection, table_name, orderby, **context):
         SEGMENTED BY hash(operation_id,transaction_dt) all nodes
         PARTITION BY COALESCE(transaction_dt::date,'1900-01-01');
         """
-        drop_duplicates_sql = f"""
+
+def create_transactions_deduplicate_sql (stg_schema_name, table_name, execution_date):
+    execution_date_under = str(execution_date).replace('-','_')
+    return f"""
         DELETE FROM {stg_schema_name}.{table_name}_{execution_date_under}
             WHERE load_id in (
                 SELECT load_id from (
@@ -136,7 +136,10 @@ def load_table(connection, table_name, orderby, **context):
                 WHERE rnum > 1
             );
         """
-        merge_sql = f"""
+
+def create_transactions_merge_sql (stg_schema_name, table_name, execution_date):
+    execution_date_under = str(execution_date).replace('-','_')
+    return f"""
         MERGE INTO {stg_schema_name}.{table_name} t
         USING {stg_schema_name}.{table_name}_{execution_date_under} s
         ON t.operation_id = s.operation_id
@@ -170,8 +173,10 @@ def load_table(connection, table_name, orderby, **context):
             ,s.transaction_dt
             ,s.operation_id);
         """
-    elif (table_name == 'currencies'):
-        create_ddl = f"""
+
+def create_currencies_ddl_sql (stg_schema_name, table_name, execution_date):
+    execution_date_under = str(execution_date).replace('-','_')
+    return f"""
         DROP TABLE IF EXISTS {stg_schema_name}.{table_name}_{execution_date_under};
 
         CREATE TABLE IF NOT EXISTS {stg_schema_name}.{table_name}_{execution_date_under} (
@@ -182,7 +187,10 @@ def load_table(connection, table_name, orderby, **context):
             load_id IDENTITY
         );
         """
-        drop_duplicates_sql = f"""
+
+def create_currencies_deduplicate_sql (stg_schema_name, table_name, execution_date):
+    execution_date_under = str(execution_date).replace('-','_')
+    return f"""
         DELETE FROM {stg_schema_name}.{table_name}_{execution_date_under}
             WHERE load_id in (select load_id from (
                 SELECT load_id , ROW_NUMBER() OVER(
@@ -192,7 +200,10 @@ def load_table(connection, table_name, orderby, **context):
             ) s 
             WHERE rnum > 1)
         """
-        merge_sql = f"""
+
+def create_currencies_merge_sql (stg_schema_name, table_name, execution_date):
+    execution_date_under = str(execution_date).replace('-','_')
+    return f"""
         MERGE INTO {stg_schema_name}.{table_name} t
         USING {stg_schema_name}.{table_name}_{execution_date_under} s
         ON (t.currency_code = s.currency_code) and (t.currency_code_with = s.currency_code_with) and (t.date_update = s.date_update)
@@ -200,15 +211,35 @@ def load_table(connection, table_name, orderby, **context):
         WHEN NOT MATCHED THEN INSERT (date_update, currency_code, currency_code_with, currency_with_div) 
         VALUES (s.date_update, s.currency_code, s.currency_code_with, s.currency_with_div);
         """
+
+def load_table(connection, table_name, **context):
+    # достаем дату запуска DAG и сдвигаем на -1 день для извлечения данных за "вчера"
+    execution_date = (context['logical_date'] - timedelta(days=1)).strftime('%Y-%m-%d') 
+    execution_date_under = str(execution_date).replace('-','_')
+    
+    files = json.loads(context['ti'].xcom_pull(key=f'files_{table_name}_{execution_date}'))
+    logger.info(f"Files: {files}")
+
+    # SQL string definition
+    copy_sql = create_copy_sql(stg_schema_name, table_name,execution_date)
+    drop_temp_sql = create_drop_sql(stg_schema_name, table_name,execution_date)
+    
+    if (table_name == 'transactions'):
+        create_ddl = create_transactions_ddl_sql(stg_schema_name, table_name, execution_date)
+        drop_duplicates_sql = create_transactions_deduplicate_sql(stg_schema_name, table_name, execution_date)
+        merge_sql = create_transactions_merge_sql(stg_schema_name, table_name, execution_date)
+    elif (table_name == 'currencies'):
+        create_ddl = create_currencies_ddl_sql (stg_schema_name, table_name, execution_date)
+        drop_duplicates_sql = create_currencies_deduplicate_sql (stg_schema_name, table_name, execution_date)
+        merge_sql = create_currencies_merge_sql (stg_schema_name, table_name, execution_date)
     else:
-        logger.warning(f"unknown table {table_name}. Skipping...")
+        logger.warning(f"Unknown table {table_name}. Skipping...")
         return
 
-
+    # SQL execution
     conn = vertica_python.connect(**connection)
     cursor = conn.cursor()
 
-    
     logger.info(f"Creating temporary table {table_name}")
     cursor.execute(create_ddl)
 
@@ -233,13 +264,6 @@ def load_table(connection, table_name, orderby, **context):
     cursor.close()
     conn.close()
 
-# default_args = {
-#     'owner': 'airflow',
-#     'depends_on_past': False,
-#     'start_date': datetime(2020, 10, 1),
-#     'retries': 1,
-#     'retry_delay': timedelta(minutes=30)
-# }
 
 dag = DAG('stg_currencies_and_transactions', default_args=default_args, schedule_interval='@daily')
 
@@ -247,8 +271,7 @@ extract_currencies_task = PythonOperator(
     task_id='extract_currencies',
     python_callable=extract_table,
     op_kwargs={"connection": postgres_connection,
-               "table_name":"currencies",
-               "orderby": "date_update"
+               "table_name":"currencies"
                },
     provide_context=True,
     dag=dag
@@ -258,8 +281,7 @@ load_currencies_task = PythonOperator(
     task_id='load_currencies',
     python_callable=load_table,
     op_kwargs={"connection": vertica_connection,
-               "table_name":"currencies",
-               "orderby": "date_update"
+               "table_name":"currencies"
                },
     provide_context=True,
     dag=dag
@@ -269,8 +291,7 @@ extract_transactions_task = PythonOperator(
     task_id='extract_transactions',
     python_callable=extract_table,
     op_kwargs={"connection": postgres_connection,
-               "table_name":"transactions",
-               "orderby": "transaction_dt"
+               "table_name":"transactions"
                },
     provide_context=True,
     dag=dag
@@ -280,8 +301,7 @@ load_transactions_task = PythonOperator(
     task_id='load_transactions',
     python_callable=load_table,
     op_kwargs={"connection": vertica_connection,
-               "table_name":"transactions",
-               "orderby": "transaction_dt"
+               "table_name":"transactions"
                },
     provide_context=True,
     dag=dag
