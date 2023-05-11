@@ -27,6 +27,7 @@ postgres_connection = Variable.get("postgres_connection", deserialize_json=True)
 vertica_connection = Variable.get("vertica_connection", deserialize_json=True)
 stg_schema_name = Variable.get("stg_schema_name", default_var='TIM_ALEINIKOV_YANDEX_RU__STAGING')
 batch_size = 1000
+tmp_dir_path = '/tmp/airflow'
 
 
 def extract_table(connection, table_name, orderby, **context):
@@ -41,6 +42,10 @@ def extract_table(connection, table_name, orderby, **context):
     offset = 0
     rest = 1
     files = []
+    # Check and create temp directory
+    if not os.path.exists(tmp_dir_path):
+        os.makedirs(tmp_dir_path)
+        logger.info(f"Created temp directory: {tmp_dir_path}")
     while rest != 0 :
 
         # Execute the query to select all rows from the table
@@ -55,7 +60,7 @@ def extract_table(connection, table_name, orderby, **context):
         if rest == 0:
             break
         
-        filepath = f"/tmp/airflow/stg_{table_name}_{execution_date}_{offset // batch_size}.csv"
+        filepath = f"{tmp_dir_path}/stg_{table_name}_{execution_date}_{offset // batch_size}.csv"
         
         # Write the data to a CSV file
         with open(filepath, 'w', newline='') as csvfile:
@@ -87,10 +92,6 @@ def create_copy_sql (stg_schema_name, table_name, execution_date):
         DIRECT STREAM NAME 'stg_stream'
         REJECTED DATA AS TABLE {stg_schema_name}.rejected_data;
     """
-
-def create_drop_sql (stg_schema_name, table_name, execution_date):
-    execution_date_under = str(execution_date).replace('-','_')
-    return f"DROP TABLE IF EXISTS {stg_schema_name}.{table_name}_{execution_date_under};"
 
 def create_transactions_ddl_sql (stg_schema_name, table_name, execution_date):
     execution_date_under = str(execution_date).replace('-','_')
@@ -212,6 +213,10 @@ def create_currencies_merge_sql (stg_schema_name, table_name, execution_date):
         VALUES (s.date_update, s.currency_code, s.currency_code_with, s.currency_with_div);
         """
 
+def create_drop_sql (stg_schema_name, table_name, execution_date):
+    execution_date_under = str(execution_date).replace('-','_')
+    return f"DROP TABLE IF EXISTS {stg_schema_name}.{table_name}_{execution_date_under};"
+
 def load_table(connection, table_name, **context):
     # достаем дату запуска DAG и сдвигаем на -1 день для извлечения данных за "вчера"
     execution_date = (context['logical_date'] - timedelta(days=1)).strftime('%Y-%m-%d') 
@@ -271,7 +276,8 @@ extract_currencies_task = PythonOperator(
     task_id='extract_currencies',
     python_callable=extract_table,
     op_kwargs={"connection": postgres_connection,
-               "table_name":"currencies"
+               "table_name":"currencies",
+               "orderby": "date_update"
                },
     provide_context=True,
     dag=dag
@@ -291,7 +297,8 @@ extract_transactions_task = PythonOperator(
     task_id='extract_transactions',
     python_callable=extract_table,
     op_kwargs={"connection": postgres_connection,
-               "table_name":"transactions"
+               "table_name":"transactions",
+               "orderby": "transaction_dt"
                },
     provide_context=True,
     dag=dag
@@ -301,7 +308,7 @@ load_transactions_task = PythonOperator(
     task_id='load_transactions',
     python_callable=load_table,
     op_kwargs={"connection": vertica_connection,
-               "table_name":"transactions"
+               "table_name":"transactions",
                },
     provide_context=True,
     dag=dag
