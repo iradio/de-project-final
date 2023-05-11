@@ -1,12 +1,7 @@
 from airflow import DAG
-from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 from airflow.operators.dummy_operator import DummyOperator
-from airflow.operators.python_operator import PythonOperator, BranchPythonOperator
-from airflow.providers.postgres.operators.postgres import PostgresOperator
-from airflow.hooks.base import BaseHook
-from airflow.providers.postgres.hooks.postgres import PostgresHook
-
+from airflow.operators.python_operator import PythonOperator
 from airflow.decorators import dag
 from airflow.models import Variable
 
@@ -243,7 +238,7 @@ def load_table(connection, table_name, orderby, **context):
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
-    'start_date': datetime(2020, 12, 1),
+    'start_date': datetime(2020, 10, 1),
     'retries': 1,
     'retry_delay': timedelta(minutes=30)
 }
