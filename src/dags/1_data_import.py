@@ -5,29 +5,27 @@ from airflow.operators.python_operator import PythonOperator
 from airflow.decorators import dag
 from airflow.models import Variable
 
+import logging
 from datetime import datetime, timedelta
-# import boto3
 
 import vertica_python
 import psycopg2
-
-# import the logging module
-import logging
 
 import csv
 import json
 
 import os
-import hashlib
+
+from default_args import default_args
+
 # get the airflow.task logger
 logger = logging.getLogger("airflow.task")
 
-
 # Don't forget to set up Connection and Variable in Airflow UI
-# postgres_connection = 'postgres_connection'
+
 postgres_connection = Variable.get("postgres_connection", deserialize_json=True)
 vertica_connection = Variable.get("vertica_connection", deserialize_json=True)
-schema_name = 'TIM_ALEINIKOV_YANDEX_RU__STAGING'
+stg_schema_name = Variable.get("stg_schema_name", default_var='TIM_ALEINIKOV_YANDEX_RU__STAGING')
 batch_size = 1000
 
 
@@ -91,18 +89,18 @@ def load_table(connection, table_name, orderby, **context):
 
     # SQL string definition
     copy_sql = f"""
-        COPY {schema_name}.{table_name}_{execution_date_under} 
+        COPY {stg_schema_name}.{table_name}_{execution_date_under} 
         FROM STDIN DELIMITER ',' ENCLOSED BY '\"' NULL AS ''
         DIRECT STREAM NAME 'stg_stream'
-        REJECTED DATA AS TABLE {schema_name}.rejected_data;
+        REJECTED DATA AS TABLE {stg_schema_name}.rejected_data;
     """
-    drop_temp_sql = f"DROP TABLE IF EXISTS {schema_name}.{table_name}_{execution_date_under};"
+    drop_temp_sql = f"DROP TABLE IF EXISTS {stg_schema_name}.{table_name}_{execution_date_under};"
     
     if (table_name == 'transactions'):
         create_ddl = f"""
-        DROP TABLE IF EXISTS {schema_name}.{table_name}_{execution_date_under};
+        DROP TABLE IF EXISTS {stg_schema_name}.{table_name}_{execution_date_under};
 
-        CREATE TABLE IF NOT EXISTS {schema_name}.{table_name}_{execution_date_under} (
+        CREATE TABLE IF NOT EXISTS {stg_schema_name}.{table_name}_{execution_date_under} (
             operation_id varchar(60) NULL,
             account_number_from int NULL,
             account_number_to int NULL,
@@ -119,7 +117,7 @@ def load_table(connection, table_name, orderby, **context):
         PARTITION BY COALESCE(transaction_dt::date,'1900-01-01');
         """
         drop_duplicates_sql = f"""
-        DELETE FROM {schema_name}.{table_name}_{execution_date_under}
+        DELETE FROM {stg_schema_name}.{table_name}_{execution_date_under}
             WHERE load_id in (
                 SELECT load_id from (
                     SELECT load_id , ROW_NUMBER() OVER(
@@ -133,14 +131,14 @@ def load_table(connection, table_name, orderby, **context):
                             ,amount
                             ,transaction_dt
                         order by load_id) as rnum
-                    FROM {schema_name}.{table_name}_{execution_date_under}
+                    FROM {stg_schema_name}.{table_name}_{execution_date_under}
                 ) s 
                 WHERE rnum > 1
             );
         """
         merge_sql = f"""
-        MERGE INTO {schema_name}.{table_name} t
-        USING {schema_name}.{table_name}_{execution_date_under} s
+        MERGE INTO {stg_schema_name}.{table_name} t
+        USING {stg_schema_name}.{table_name}_{execution_date_under} s
         ON t.operation_id = s.operation_id
             and t.account_number_from = s.account_number_from
             and t.account_number_to = s.account_number_to
@@ -174,9 +172,9 @@ def load_table(connection, table_name, orderby, **context):
         """
     elif (table_name == 'currencies'):
         create_ddl = f"""
-        DROP TABLE IF EXISTS {schema_name}.{table_name}_{execution_date_under};
+        DROP TABLE IF EXISTS {stg_schema_name}.{table_name}_{execution_date_under};
 
-        CREATE TABLE IF NOT EXISTS {schema_name}.{table_name}_{execution_date_under} (
+        CREATE TABLE IF NOT EXISTS {stg_schema_name}.{table_name}_{execution_date_under} (
             date_update TIMESTAMP(0) NULL,
             currency_code int NULL,
             currency_code_with int NULL,
@@ -185,18 +183,18 @@ def load_table(connection, table_name, orderby, **context):
         );
         """
         drop_duplicates_sql = f"""
-        DELETE FROM {schema_name}.{table_name}_{execution_date_under}
+        DELETE FROM {stg_schema_name}.{table_name}_{execution_date_under}
             WHERE load_id in (select load_id from (
                 SELECT load_id , ROW_NUMBER() OVER(
                     partition by date_update, currency_code, currency_code_with, currency_with_div
                     order by load_id) as rnum
-                FROM {schema_name}.{table_name}_{execution_date_under}
+                FROM {stg_schema_name}.{table_name}_{execution_date_under}
             ) s 
             WHERE rnum > 1)
         """
         merge_sql = f"""
-        MERGE INTO {schema_name}.{table_name} t
-        USING {schema_name}.{table_name}_{execution_date_under} s
+        MERGE INTO {stg_schema_name}.{table_name} t
+        USING {stg_schema_name}.{table_name}_{execution_date_under} s
         ON (t.currency_code = s.currency_code) and (t.currency_code_with = s.currency_code_with) and (t.date_update = s.date_update)
         WHEN MATCHED THEN UPDATE SET currency_with_div = s.currency_with_div
         WHEN NOT MATCHED THEN INSERT (date_update, currency_code, currency_code_with, currency_with_div) 
@@ -216,18 +214,18 @@ def load_table(connection, table_name, orderby, **context):
 
     for filepath in files:
         with open(filepath, 'rb') as csvfile:
-            logger.info(f"Load file {filepath} to table: {schema_name}.{table_name}_{execution_date_under}")
+            logger.info(f"Load file {filepath} to table: {stg_schema_name}.{table_name}_{execution_date_under}")
             cursor.copy(copy_sql, csvfile, buffer_size=65536)
             
         conn.commit()
         os.remove(filepath)
         logger.info(f'Remove temp file: {filepath}')
     
-    logger.info(f"Drop duplicates in table: {schema_name}.{table_name}_{execution_date_under}")
+    logger.info(f"Drop duplicates in table: {stg_schema_name}.{table_name}_{execution_date_under}")
     cursor.execute(drop_duplicates_sql)
-    logger.info(f"Execute merge SQL: {schema_name}.{table_name}_{execution_date_under} INTO {schema_name}.{table_name}")
+    logger.info(f"Execute merge SQL: {stg_schema_name}.{table_name}_{execution_date_under} INTO {stg_schema_name}.{table_name}")
     cursor.execute(merge_sql)
-    logger.info(f"Drop temp table: {schema_name}.{table_name}_{execution_date_under}")
+    logger.info(f"Drop temp table: {stg_schema_name}.{table_name}_{execution_date_under}")
     cursor.execute(drop_temp_sql)
 
     conn.commit()
@@ -235,13 +233,13 @@ def load_table(connection, table_name, orderby, **context):
     cursor.close()
     conn.close()
 
-default_args = {
-    'owner': 'airflow',
-    'depends_on_past': False,
-    'start_date': datetime(2020, 10, 1),
-    'retries': 1,
-    'retry_delay': timedelta(minutes=30)
-}
+# default_args = {
+#     'owner': 'airflow',
+#     'depends_on_past': False,
+#     'start_date': datetime(2020, 10, 1),
+#     'retries': 1,
+#     'retry_delay': timedelta(minutes=30)
+# }
 
 dag = DAG('stg_currencies_and_transactions', default_args=default_args, schedule_interval='@daily')
 

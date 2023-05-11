@@ -6,24 +6,20 @@ from airflow.decorators import dag
 from airflow.models import Variable
 
 from datetime import datetime, timedelta
-# import boto3
+
+from default_args import default_args
 
 import vertica_python
 
 # import the logging module
 import logging
-
-# get the airflow.task logger
 logger = logging.getLogger("airflow.task")
-
 
 # Don't forget to set up Connection and Variable in Airflow UI
 vertica_connection = Variable.get("vertica_connection", deserialize_json=True)
-stg_schema_name = 'TIM_ALEINIKOV_YANDEX_RU__STAGING'
-cdm_schema_name = 'TIM_ALEINIKOV_YANDEX_RU__DWH'
-cdm_table_name = 'global_metrics'
-
-
+stg_schema_name = Variable.get("stg_schema_name", default_var='TIM_ALEINIKOV_YANDEX_RU__STAGING')
+cdm_schema_name = Variable.get("cdm_schema_name", default_var='TIM_ALEINIKOV_YANDEX_RU__DWH')
+cdm_table_name = Variable.get("cdm_table_name", default_var='global_metrics')
 
 def calculate_global_metrics(connection, table_name, **context):
     # достаем дату запуска DAG и сдвигаем на -1 день для извлечения данных за "вчера"
@@ -58,9 +54,15 @@ def calculate_global_metrics(connection, table_name, **context):
                                 and t.currency_code  = c.currency_code
             where cb.operation_id is null
         		and transaction_day = '{execution_date}' -- выбираем только один день
-                and t.account_number_from != -1 -- убираем тестовые аккаунты
-                and t.status = 'done' -- оставляем только done
-                and t.transaction_type like '%incoming' -- оставляем только incoming тразации
+                and account_number_from > 0 -- убираем тестовые аккаунты
+                and account_number_to > 0 -- убираем тестовые аккаунты
+                and t.status = 'done' -- оставляем только завершенные транзакции
+                and t.transaction_type in ('c2a_incoming',
+                                            'c2b_partner_incoming',
+                                            'sbp_incoming',
+                                            'sbp_outgoing',
+                                            'transfer_incoming',
+                                            'transfer_outgoing')
             order by t.operation_id
         ) 
         select 
@@ -89,13 +91,13 @@ def calculate_global_metrics(connection, table_name, **context):
     cursor.close()
     conn.close()
 
-default_args = {
-    'owner': 'airflow',
-    'depends_on_past': False,
-    'start_date': datetime(2020, 12, 1),
-    'retries': 1,
-    'retry_delay': timedelta(minutes=30)
-}
+# default_args = {
+#     'owner': 'airflow',
+#     'depends_on_past': False,
+#     'start_date': datetime(2020, 12, 1),
+#     'retries': 1,
+#     'retry_delay': timedelta(minutes=30)
+# }
 
 dag = DAG('cdm_global_metrics', default_args=default_args, schedule_interval='@daily')
 
